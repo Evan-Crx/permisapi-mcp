@@ -6,10 +6,10 @@ Permet à **Claude Desktop**, **Cursor**, **Windsurf** ou tout client MCP-compat
 de consulter **1,2 M+ permis de construire de France** (Sitadel 2014-2026,
 résidentiel + non-résidentiel, depuis 2014) en langage naturel.
 
-10 outils disponibles : recherche par adresse, score d'opportunité Marchand de
+11 outils disponibles : recherche par adresse, score d'opportunité Marchand de
 Biens, prix au m² des ventes voisines sur 12 ans, zonage urbanisme PLU, risques
-(inondation, sismique, ICPE), parcelle cadastre DGFiP, et enrichissement de
-liste client.
+(inondation, sismique, ICPE), parcelle cadastre DGFiP, **bâtiments existants
+(terrain nu vs déjà bâti)** et enrichissement de liste client.
 
 ## Pré-requis
 
@@ -70,7 +70,7 @@ Les exemples ci-dessus ciblent Paris (75) pour qu'ils fonctionnent immédiatemen
 
 Voir le guide complet : [https://permisapi.fr/mcp](https://permisapi.fr/mcp)
 
-## Tools disponibles (10)
+## Tools disponibles (11)
 
 | Tool | Endpoint | Plan |
 |---|---|:---:|
@@ -82,6 +82,7 @@ Voir le guide complet : [https://permisapi.fr/mcp](https://permisapi.fr/mcp)
 | `get_plu_zoning` | GET /v1/permits/{num_pa}/plu | Pro |
 | `get_risks` | GET /v1/permits/{num_pa}/risks (Géorisques BRGM) | Pro |
 | `get_parcelle_geometry` | GET /v1/permits/{num_pa}/parcelle (cadastre DGFiP) | Pro |
+| **`get_existing_buildings`** | **GET /v1/permits/{num_pa}/batiments-existants** (terrain nu vs bâti, use case MDB) | Pro |
 | `get_permit_full_view` | GET /v1/permits/{num_pa}/360 (composite 6-en-1) | Pro |
 | `bulk_enrich_list` | POST /v1/permits/bulk-enrich (croise liste client jusqu'à 1 000 lignes) | Business |
 
@@ -90,7 +91,7 @@ Voir le guide complet : [https://permisapi.fr/mcp](https://permisapi.fr/mcp)
 - La clé API reste **côté user** (env var locale, jamais transmise au LLM)
 - Le LLM voit uniquement les arguments des tools (pas la clé)
 - Validation stricte des inputs (regex sur `num_pa`, ranges Pydantic)
-- 9 outils en consultation pure (GET) + 1 outil de croisement de liste (POST
+- 10 outils en consultation pure (GET) + 1 outil de croisement de liste (POST
   bulk_enrich_list, lecture seule côté PermisAPI : renvoie les permis qui
   matchent les adresses du client, sans stocker la liste)
 

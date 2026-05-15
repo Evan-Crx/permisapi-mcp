@@ -4,17 +4,18 @@ Cette couche est testable sans avoir le `mcp` package installé : on
 mock juste httpx ou on utilise MockTransport. Le server.py construit
 les Tool MCP à partir d'ici.
 
-10 tools exposés :
-  1. search_permits        : GET /v1/permits avec filtres (Free)
-  2. get_permit_details    : GET /v1/permits/{num_pa} (Free)
-  3. find_dvf_neighbors    : GET /v1/permits/{num_pa}/dvf (Pro, 12 ans)
-  4. get_mdb_score         : GET /v1/permits/{num_pa}/score (Pro, v0.2 10 signaux)
-  5. get_plu_zoning        : GET /v1/permits/{num_pa}/plu (Pro)
-  6. get_risks             : GET /v1/permits/{num_pa}/risks (Pro)
-  7. get_parcelle_geometry : GET /v1/permits/{num_pa}/parcelle (Pro, cadastre DGFiP)
-  8. bulk_enrich_list      : POST /v1/permits/bulk-enrich (Business, croise liste client)
-  9. fuzzy_search_addresses : GET /v1/search?q=text (Free, pg_trgm fuzzy)
-  10. get_permit_full_view  : GET /v1/permits/{num_pa}/360 (Pro, composite 6-en-1)
+11 tools exposés :
+  1. search_permits         : GET /v1/permits avec filtres (Free)
+  2. get_permit_details     : GET /v1/permits/{num_pa} (Free)
+  3. find_dvf_neighbors     : GET /v1/permits/{num_pa}/dvf (Pro, 12 ans)
+  4. get_mdb_score          : GET /v1/permits/{num_pa}/score (Pro, v0.2 10 signaux)
+  5. get_plu_zoning         : GET /v1/permits/{num_pa}/plu (Pro)
+  6. get_risks              : GET /v1/permits/{num_pa}/risks (Pro)
+  7. get_parcelle_geometry  : GET /v1/permits/{num_pa}/parcelle (Pro, cadastre DGFiP)
+  8. get_existing_buildings : GET /v1/permits/{num_pa}/batiments-existants (Pro, terrain nu vs bâti)
+  9. bulk_enrich_list       : POST /v1/permits/bulk-enrich (Business, croise liste client)
+  10. fuzzy_search_addresses : GET /v1/search?q=text (Free, pg_trgm fuzzy)
+  11. get_permit_full_view  : GET /v1/permits/{num_pa}/360 (Pro, composite 6-en-1)
 
 Sécurité : la clé API du user est lue depuis l'env PERMISAPI_KEY au
 démarrage du serveur, jamais transmise via les arguments d'un tool.
@@ -63,7 +64,7 @@ async def _http_get(
     headers = {
         "X-API-Key": _api_key(),
         "Accept": "application/json",
-        "User-Agent": "permisapi-mcp/0.4.0",
+        "User-Agent": "permisapi-mcp/0.5.0",
     }
     own_client = client is None
     c = client or httpx.AsyncClient(timeout=HTTP_TIMEOUT)
@@ -95,7 +96,7 @@ async def _http_post(
         "X-API-Key": _api_key(),
         "Accept": "application/json",
         "Content-Type": "application/json",
-        "User-Agent": "permisapi-mcp/0.4.0",
+        "User-Agent": "permisapi-mcp/0.5.0",
     }
     own_client = client is None
     c = client or httpx.AsyncClient(timeout=HTTP_TIMEOUT)
@@ -314,11 +315,37 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "description": (
             "Géométrie précise de la parcelle cadastre DGFiP du permis "
             "(via Etalab open data). Retourne un GeoJSON Polygon WGS84 "
-            "+ surface mesuree en m2 + identifiant Etalab. Permet de "
+            "+ surface mesurée en m2 + identifiant Etalab. Permet de "
             "visualiser le polygon exact de la parcelle sur une carte "
             "(vs juste le point lat/lng adresse). Plan Pro+ uniquement. "
             "404 si la commune n'est pas encore en cache (rare, hors "
             "couverture Etalab DOM très récents)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "num_pa": {
+                    "type": "string",
+                    "description": "Identifiant Sitadel unique (ex PC07404021K1).",
+                },
+            },
+            "required": ["num_pa"],
+        },
+    },
+    {
+        "name": "get_existing_buildings",
+        "description": (
+            "Liste les bâtiments cadastraux déjà construits sur la "
+            "parcelle du permit. Use case CRITIQUE marchand de biens : "
+            "distinguer parcelle nue (vraie construction neuve, value-add "
+            "max) vs parcelle bâtie (extension/rénovation, value-add "
+            "moindre). Retourne nb_batiments total + décompte par type "
+            "(bâti dur / bâti léger / autre) + flag parcelle_nue boolean "
+            "+ détails individuels (id Etalab, type label FR, centroïde, "
+            "dates création/MAJ cadastre). Source : cadastre.data.gouv.fr "
+            "via Etalab (DGFiP). Plan Pro+ uniquement. Coût 1 unité quota. "
+            "404 si le permit n'a pas de polygone cadastre disponible "
+            "(rare, ~15% des permits)."
         ),
         "inputSchema": {
             "type": "object",
@@ -601,6 +628,23 @@ async def get_parcelle_geometry(
     return await _http_get(f"/v1/permits/{num_pa}/parcelle", client=client)
 
 
+async def get_existing_buildings(
+    arguments: dict[str, Any],
+    *,
+    client: httpx.AsyncClient | None = None,
+) -> dict[str, Any]:
+    """GET /v1/permits/{num_pa}/batiments-existants : bâtiments cadastraux.
+
+    Use case marchand de biens : distinguer parcelle nue (vraie
+    construction neuve) vs parcelle bâtie (extension/rénovation).
+    Plan Pro+ uniquement. Coût 1 unité quota.
+    """
+    num_pa = _validate_num_pa(arguments.get("num_pa"))
+    return await _http_get(
+        f"/v1/permits/{num_pa}/batiments-existants", client=client
+    )
+
+
 async def get_permit_full_view(
     arguments: dict[str, Any],
     *,
@@ -630,6 +674,7 @@ TOOL_HANDLERS = {
     "get_plu_zoning": get_plu_zoning,
     "get_risks": get_risks,
     "get_parcelle_geometry": get_parcelle_geometry,
+    "get_existing_buildings": get_existing_buildings,
     "fuzzy_search_addresses": fuzzy_search_addresses,
     "bulk_enrich_list": bulk_enrich_list,
     "get_permit_full_view": get_permit_full_view,
