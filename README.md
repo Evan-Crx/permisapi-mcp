@@ -53,11 +53,18 @@ ou `%APPDATA%\Claude\claude_desktop_config.json` (Windows) :
 
 Redémarrez Claude Desktop. Vous pouvez maintenant demander :
 
-> *« Liste les permis de logement déposés à Bordeaux ce mois avec un score MDB > 70 »*
+> *« Liste les permis de logement déposés à Paris ce mois avec un score MDB > 70 »*
 >
 > *« Trouve-moi des opportunités MDB autour de la rue de Passy à Paris »*
 >
 > *« Quel est le zonage PLU du permis PC07404021K1 ? »*
+
+**Note sur le périmètre géographique** :
+- **Free** : 1 département au choix (Paris par défaut). Modifiable via le dashboard.
+- **Explorer** : 5 départements au choix (Paris/Lyon/Marseille/Bordeaux/Toulouse par défaut).
+- **Pro / Business / Enterprise** : France entière, aucune restriction géographique.
+
+Les exemples ci-dessus ciblent Paris (75) pour qu'ils fonctionnent immédiatement sur tous les plans. Si vous êtes sur Explorer avec ses départements par défaut, vous pouvez aussi demander "à Lyon", "à Bordeaux", etc.
 
 ## Configuration Cursor / Windsurf / autres clients
 
