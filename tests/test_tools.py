@@ -48,7 +48,7 @@ def _mock_transport(handler):
 # ----------------------------------------------------------------------------
 
 
-def test_seven_tools_defined():
+def test_ten_tools_defined():
     names = {t["name"] for t in TOOL_SCHEMAS}
     assert names == {
         "search_permits",
@@ -57,6 +57,9 @@ def test_seven_tools_defined():
         "get_mdb_score",
         "get_plu_zoning",
         "get_risks",
+        "get_parcelle_geometry",
+        "fuzzy_search_addresses",
+        "bulk_enrich_list",
         "get_permit_full_view",
     }
 

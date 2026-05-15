@@ -1,7 +1,7 @@
 """permisapi-mcp : serveur MCP pour PermisAPI.
 
-Permet a Claude Desktop, Cursor, Windsurf, ou tout client MCP-compatible
-de consulter les permis de construire France en langage naturel.
+Permet à Claude Desktop, Cursor, Windsurf, ou tout client MCP-compatible
+de consulter les permis de construire de France en langage naturel.
 
 Usage :
     pip install permisapi-mcp
@@ -19,4 +19,4 @@ Usage :
 Voir docs/MCP_SETUP.md pour le guide complet.
 """
 
-__version__ = "0.2.1"
+__version__ = "0.4.0"

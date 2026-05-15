@@ -1,16 +1,16 @@
 """Serveur MCP stdio pour PermisAPI.
 
-Implemente le Model Context Protocol (Anthropic, novembre 2024) en
+Implémente le Model Context Protocol (Anthropic, novembre 2024) en
 mode stdio pour Claude Desktop / Cursor / Windsurf / autres clients
 MCP-compatibles.
 
-Lance via la commande `permisapi-mcp` (entry point pyproject.toml).
-La cle PermisAPI est lue depuis l'env PERMISAPI_KEY au demarrage.
+Lancé via la commande `permisapi-mcp` (entry point pyproject.toml).
+La clé PermisAPI est lue depuis l'env PERMISAPI_KEY au démarrage.
 
 Architecture :
   - Imports `mcp` lib (Anthropic) au runtime, gracieux si absent
-  - Tools list construit a partir de tools.TOOL_SCHEMAS
-  - Dispatch via tools.call_tool() (logique testable separement)
+  - Tools list construit à partir de tools.TOOL_SCHEMAS
+  - Dispatch via tools.call_tool() (logique testable séparément)
 """
 from __future__ import annotations
 
@@ -27,25 +27,25 @@ logging.basicConfig(
 
 
 def main() -> None:
-    """Entry point synchrone (appele par `permisapi-mcp` script)."""
+    """Entry point synchrone (appelé par `permisapi-mcp` script)."""
     try:
         asyncio.run(_run_server())
     except KeyboardInterrupt:
-        logger.info("Arret demande, bye.")
+        logger.info("Arrêt demandé, bye.")
     except Exception:  # noqa: BLE001
         logger.exception("Erreur fatale")
         sys.exit(1)
 
 
 async def _run_server() -> None:
-    """Cree le serveur MCP et lance le transport stdio."""
+    """Crée le serveur MCP et lance le transport stdio."""
     try:
         from mcp.server import Server
         from mcp.server.stdio import stdio_server
         from mcp.types import TextContent, Tool
     except ImportError as exc:
         logger.error(
-            "Le package `mcp` n'est pas installe. Lance "
+            "Le package `mcp` n'est pas installé. Lance "
             "`pip install permisapi-mcp` pour tout installer correctement. "
             "Erreur : %s",
             exc,
@@ -72,7 +72,7 @@ async def _run_server() -> None:
         result_text = await call_tool(name, arguments or {})
         return [TextContent(type="text", text=result_text)]
 
-    logger.info("permisapi-mcp pret. Connecte via stdio.")
+    logger.info("permisapi-mcp prêt. Connecté via stdio.")
     async with stdio_server() as (read_stream, write_stream):
         await app.run(
             read_stream,

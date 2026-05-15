@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "permisapi-mcp"
-version = "0.2.1"
-description = "MCP server pour PermisAPI : permettez a Claude / ChatGPT / Cursor de consulter les permis de construire France en langage naturel."
+version = "0.4.0"
+description = "Serveur MCP pour PermisAPI : 10 outils pour consulter 1,2 M+ permis de construire de France (2014-2026) depuis Claude Desktop, Cursor, Windsurf et tout client MCP-compatible."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -26,7 +26,7 @@ classifiers = [
 ]
 dependencies = [
     "mcp>=1.0.0",
-    "permisapi-client>=0.7.1",
+    "permisapi-client>=0.7.2",
 ]
 
 [project.optional-dependencies]
@@ -41,7 +41,9 @@ permisapi-mcp = "permisapi_mcp.server:main"
 [project.urls]
 Homepage = "https://permisapi.fr/mcp"
 Documentation = "https://permisapi.fr/mcp"
-Setup = "https://github.com/Evan-Crx/permisapi/blob/master/docs/MCP_SETUP.md"
+Setup = "https://github.com/Evan-Crx/permisapi-mcp/blob/main/README.md"
+Source = "https://github.com/Evan-Crx/permisapi-mcp"
+Issues = "https://github.com/Evan-Crx/permisapi-mcp/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["permisapi_mcp"]

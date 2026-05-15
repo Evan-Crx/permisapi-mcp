@@ -1,23 +1,42 @@
 # permisapi-mcp
 
-**MCP** (Model Context Protocol) server for [PermisAPI](https://permisapi.fr).
+Serveur **MCP** (Model Context Protocol, Anthropic) pour [PermisAPI](https://permisapi.fr).
 
-Lets **Claude Desktop**, **Cursor**, **Windsurf**, or any MCP-compatible
-client query the **311 000+ French building permits** (Sitadel open data,
-Etalab license) in natural language.
+Permet à **Claude Desktop**, **Cursor**, **Windsurf** ou tout client MCP-compatible
+de consulter **1,2 M+ permis de construire de France** (Sitadel 2014-2026,
+résidentiel + non-résidentiel, depuis 2014) en langage naturel.
+
+10 outils disponibles : recherche par adresse, score d'opportunité Marchand de
+Biens, prix au m² des ventes voisines sur 12 ans, zonage urbanisme PLU, risques
+(inondation, sismique, ICPE), parcelle cadastre DGFiP, et enrichissement de
+liste client.
+
+## Pré-requis
+
+- **Python 3.10 ou plus récent** (requis par le MCP SDK Anthropic, non négociable)
+- Une clé PermisAPI : [https://permisapi.fr/#pricing](https://permisapi.fr/#pricing) (gratuite pour commencer)
 
 ## Installation
+
+Vérifier d'abord la version Python :
+
+```bash
+python --version       # macOS / Linux / Windows
+```
+
+Si `>= 3.10` :
 
 ```bash
 pip install permisapi-mcp
 ```
 
-You need a free PermisAPI API key : https://permisapi.fr/#pricing
+Si `< 3.10`, voir la section [Troubleshooting](#troubleshooting) plus bas
+(workaround `uvx` en 1 commande, pas besoin d'upgrade système).
 
-## Claude Desktop config
+## Configuration Claude Desktop
 
-Edit `~/Library/Application Support/Claude/claude_desktop_config.json`
-(macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows) :
+Éditez `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS)
+ou `%APPDATA%\Claude\claude_desktop_config.json` (Windows) :
 
 ```json
 {
@@ -25,65 +44,110 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json`
     "permisapi": {
       "command": "permisapi-mcp",
       "env": {
-        "PERMISAPI_KEY": "pk_live_YOUR_KEY"
+        "PERMISAPI_KEY": "pk_live_VOTRE_CLE"
       }
     }
   }
 }
 ```
 
-Restart Claude Desktop. Then ask in natural language :
+Redémarrez Claude Desktop. Vous pouvez maintenant demander :
 
-> "List the residential permits filed in Bordeaux this month with an
-> MDB score above 70"
+> *« Liste les permis de logement déposés à Bordeaux ce mois avec un score MDB > 70 »*
 >
-> "Find me real estate dealer opportunities around rue de Passy in Paris"
+> *« Trouve-moi des opportunités MDB autour de la rue de Passy à Paris »*
 >
-> "What is the PLU zoning of permit PC07404021K1 ?"
+> *« Quel est le zonage PLU du permis PC07404021K1 ? »*
 
-## Cursor / Windsurf / other MCP clients
+## Configuration Cursor / Windsurf / autres clients
 
-Full guide : https://permisapi.fr/mcp
+Voir le guide complet : [https://permisapi.fr/mcp](https://permisapi.fr/mcp)
 
-## 7 tools available
+## Tools disponibles (10)
 
 | Tool | Endpoint | Plan |
 |---|---|:---:|
-| `search_permits` | GET /v1/permits | Free |
+| `search_permits` | GET /v1/permits (13 filtres) | Free |
 | `get_permit_details` | GET /v1/permits/{num_pa} | Free |
-| `get_permit_full_view` | GET /v1/permits/{num_pa}/360 | Free (detail only) / Pro (6-in-1) |
-| `find_dvf_neighbors` | GET /v1/permits/{num_pa}/dvf | Pro |
-| `get_mdb_score` | GET /v1/permits/{num_pa}/score | Pro |
+| `fuzzy_search_addresses` | GET /v1/search?q=text (pg_trgm fuzzy) | Free |
+| `find_dvf_neighbors` | GET /v1/permits/{num_pa}/dvf (12 ans : Cerema DVF+ 2014-2020 fusionné Geo-DVF 2021-2025) | Pro |
+| `get_mdb_score` | GET /v1/permits/{num_pa}/score (Score MDB v0.2, 10 signaux) | Pro |
 | `get_plu_zoning` | GET /v1/permits/{num_pa}/plu | Pro |
-| `get_risks` | GET /v1/permits/{num_pa}/risks | Pro |
+| `get_risks` | GET /v1/permits/{num_pa}/risks (Géorisques BRGM) | Pro |
+| `get_parcelle_geometry` | GET /v1/permits/{num_pa}/parcelle (cadastre DGFiP) | Pro |
+| `get_permit_full_view` | GET /v1/permits/{num_pa}/360 (composite 6-en-1) | Pro |
+| `bulk_enrich_list` | POST /v1/permits/bulk-enrich (croise liste client jusqu'à 1 000 lignes) | Business |
 
-The composite `get_permit_full_view` (Vue 360) returns detail + sirene +
-dvf + score + plu + risks in one tool call. Quota cost is honest : 1
-unit on Free / Explorer (detail only), 6 units on Pro+ (1 per
-sub-feature, identical to 6 separate calls).
+## Sécurité
 
-## Security
+- La clé API reste **côté user** (env var locale, jamais transmise au LLM)
+- Le LLM voit uniquement les arguments des tools (pas la clé)
+- Validation stricte des inputs (regex sur `num_pa`, ranges Pydantic)
+- 9 outils en consultation pure (GET) + 1 outil de croisement de liste (POST
+  bulk_enrich_list, lecture seule côté PermisAPI : renvoie les permis qui
+  matchent les adresses du client, sans stocker la liste)
 
-- Your API key stays **local** (env var), never transmitted to the LLM
-- LLM sees only the tool arguments, not the key
-- Strict input validation (regex on `num_pa`, Pydantic ranges)
-- All tools are **read-only** (GET only). No mutations, no state changes.
+## Troubleshooting
 
-## Pricing
+### `pip install permisapi-mcp` dit "package introuvable" ou "no matching distribution"
 
-- Free 500 req/month, no card
-- Explorer 49 EUR/month
-- Pro 199 EUR/month (unlocks the 4 enrichment tools)
-- Business 499 EUR/month
-- Enterprise 1999+ EUR/month
+Cause la plus fréquente : votre Python est plus ancien que 3.10. Le MCP SDK
+Anthropic requiert Python 3.10 minimum, on ne peut pas descendre cette borne.
 
-The MCP server uses the same quota as the underlying REST API, no
-separate counter.
+Vérifiez :
 
-## License
+```bash
+python --version       # ou python3 --version
+```
+
+Si `< 3.10`, deux solutions au choix.
+
+**Solution A (recommandée, 30 secondes) : `uvx` avec pin Python**
+
+`uvx` installe et lance le serveur dans un Python isolé pinné à la version
+voulue, sans toucher à votre installation système.
+
+```bash
+# 1. Installer uv (une seule fois)
+curl -LsSf https://astral.sh/uv/install.sh | sh         # macOS / Linux
+powershell -c "irm https://astral.sh/uv/install.ps1 | iex"  # Windows PowerShell
+
+# 2. Lancer le serveur
+uvx --python 3.11 permisapi-mcp
+```
+
+Puis dans la config Claude Desktop, remplacez `"command": "permisapi-mcp"` par :
+
+```json
+{
+  "mcpServers": {
+    "permisapi": {
+      "command": "uvx",
+      "args": ["--python", "3.11", "permisapi-mcp"],
+      "env": { "PERMISAPI_KEY": "pk_live_VOTRE_CLE" }
+    }
+  }
+}
+```
+
+**Solution B : upgrade Python système**
+
+- macOS : `brew install python@3.11`
+- Windows : télécharger https://www.python.org/downloads/ et cocher "Add to PATH"
+- Linux : `sudo apt install python3.11` (ou équivalent distro)
+
+Puis `pip3.11 install permisapi-mcp`.
+
+Guide setup complet + autres FAQ : [https://permisapi.fr/mcp](https://permisapi.fr/mcp)
+
+## Licence
 
 MIT.
 
 ## Support
 
-evan@permisapi.fr (24-72h reply).
+evan@permisapi.fr : réponse 24-48h sur les plans Pro+, 24-72h sur les autres.
+
+## Code source
+
+[github.com/Evan-Crx/permisapi-mcp](https://github.com/Evan-Crx/permisapi-mcp)
