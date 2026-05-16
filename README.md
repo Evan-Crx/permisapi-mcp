@@ -1,5 +1,7 @@
 # permisapi-mcp
 
+[![permisapi-mcp MCP server](https://glama.ai/mcp/servers/Evan-Crx/permisapi-mcp/badges/card.svg)](https://glama.ai/mcp/servers/Evan-Crx/permisapi-mcp)
+
 Serveur **MCP** (Model Context Protocol, Anthropic) pour [PermisAPI](https://permisapi.fr).
 
 Permet à **Claude Desktop**, **Cursor**, **Windsurf** ou tout client MCP-compatible
