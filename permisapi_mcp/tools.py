@@ -4,18 +4,19 @@ Cette couche est testable sans avoir le `mcp` package installé : on
 mock juste httpx ou on utilise MockTransport. Le server.py construit
 les Tool MCP à partir d'ici.
 
-11 tools exposés :
+12 tools exposés :
   1. search_permits         : GET /v1/permits avec filtres (Free)
   2. get_permit_details     : GET /v1/permits/{num_pa} (Free)
   3. find_dvf_neighbors     : GET /v1/permits/{num_pa}/dvf (Pro, 12 ans)
-  4. get_mdb_score          : GET /v1/permits/{num_pa}/score (Pro, v0.2 10 signaux)
+  4. get_mdb_score          : GET /v1/permits/{num_pa}/score (Pro, v0.3 11 signaux)
   5. get_plu_zoning         : GET /v1/permits/{num_pa}/plu (Pro)
   6. get_risks              : GET /v1/permits/{num_pa}/risks (Pro)
   7. get_parcelle_geometry  : GET /v1/permits/{num_pa}/parcelle (Pro, cadastre DGFiP)
   8. get_existing_buildings : GET /v1/permits/{num_pa}/batiments-existants (Pro, terrain nu vs bâti)
-  9. bulk_enrich_list       : POST /v1/permits/bulk-enrich (Business, croise liste client)
-  10. fuzzy_search_addresses : GET /v1/search?q=text (Free, pg_trgm fuzzy)
-  11. get_permit_full_view  : GET /v1/permits/{num_pa}/360 (Pro, composite 6-en-1)
+  9. get_parcelle_by_id     : GET /v1/parcelles/{id_parcelle} (Pro, lookup direct cadastre DGFiP)
+  10. bulk_enrich_list       : POST /v1/permits/bulk-enrich (Business, croise liste client)
+  11. fuzzy_search_addresses : GET /v1/search?q=text (Free, pg_trgm fuzzy)
+  12. get_permit_full_view  : GET /v1/permits/{num_pa}/360 (Pro, composite 6-en-1)
 
 Sécurité : la clé API du user est lue depuis l'env PERMISAPI_KEY au
 démarrage du serveur, jamais transmise via les arguments d'un tool.
@@ -26,6 +27,7 @@ from __future__ import annotations
 import contextvars
 import json
 import os
+import re
 from contextlib import contextmanager
 from typing import Any, Iterator
 
@@ -101,7 +103,7 @@ async def _http_get(
     headers = {
         "X-API-Key": _api_key(),
         "Accept": "application/json",
-        "User-Agent": "permisapi-mcp/0.5.1",
+        "User-Agent": "permisapi-mcp/0.5.2",
     }
     own_client = client is None
     c = client or httpx.AsyncClient(timeout=HTTP_TIMEOUT)
@@ -133,7 +135,7 @@ async def _http_post(
         "X-API-Key": _api_key(),
         "Accept": "application/json",
         "Content-Type": "application/json",
-        "User-Agent": "permisapi-mcp/0.5.1",
+        "User-Agent": "permisapi-mcp/0.5.2",
     }
     own_client = client is None
     c = client or httpx.AsyncClient(timeout=HTTP_TIMEOUT)
@@ -577,6 +579,54 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "get_parcelle_by_id",
+        "description": (
+            "Lookup direct cadastre DGFiP par identifiant Etalab 14 chars : "
+            "retourne en 1 appel le contexte complet d'une parcelle sans "
+            "passer par un permit. Réponse : centroïde lat/lng, contenance "
+            "officielle DGFiP en m², commune (code INSEE + nom), département, "
+            "section + numero cadastraux + prefix, polygon GeoJSON Polygon "
+            "si dispo (récupéré du 1er permit lié qui a cadastre_geom), "
+            "compteur bâtiments existants si polygon dispo (ST_Within), "
+            "flag parcelle_nue booléen pratique pour marchand de biens. "
+            "Use case : 'j'ai vu la parcelle 75104000AA0123, donne-moi tout "
+            "ce qu'on en sait + tous les permis historiques associés'. "
+            "Cohérent avec /v1/permits/{num_pa}/parcelle mais en lookup "
+            "inverse (parcelle -> permits) plutôt que (permit -> parcelle). "
+            "Permits associés retournés via matching commune + section + "
+            "numero, triés par année de dépôt décroissante, limité à 50. "
+            "Pour Paris/Lyon/Marseille, le mapping arrondissement -> "
+            "ville-mère est automatique. Plan Pro+ uniquement. Coût quota : "
+            "1 (parcelle) + 1 par permis retourné (composite cohérent avec "
+            "le pattern bulk_enrich_list et /360). Source : Etalab DGFiP, "
+            "35 millions de parcelles France entière, mise à jour mensuelle. "
+            "404 si id_parcelle inexistant (vérifier le format 14 chars "
+            "alphanumérique majuscule, ex '75104000AA0123')."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "id_parcelle": {
+                    "type": "string",
+                    "pattern": "^[A-Z0-9]{14}$",
+                    "minLength": 14,
+                    "maxLength": 14,
+                    "description": (
+                        "Identifiant cadastral DGFiP, 14 caractères "
+                        "alphanumériques majuscules au format strict "
+                        "`{commune_5}{prefix_3}{section_2}{numero_4}`. "
+                        "Exemple Paris 4e : `75104000AA0123` (commune 75104, "
+                        "prefix 000, section AA, parcelle 0123). Récupérable "
+                        "depuis la réponse de get_parcelle_geometry "
+                        "(champ `cadastre_id`) ou search_permits (champ "
+                        "`cadastre_id` des permits Pro+)."
+                    ),
+                },
+            },
+            "required": ["id_parcelle"],
+        },
+    },
+    {
         "name": "bulk_enrich_list",
         "description": (
             "Croisez une liste fournie par l'utilisateur (max 1000 lignes) "
@@ -938,6 +988,47 @@ async def get_existing_buildings(
     )
 
 
+_ID_PARCELLE_REGEX = re.compile(r"^[A-Z0-9]{14}$")
+
+
+def _validate_id_parcelle(value: Any) -> str:
+    """Valide un id_parcelle MCP : str 14 chars alphanumériques majuscules.
+
+    Accepte les inputs en minuscule (uppercase auto) + espaces (strip auto).
+    Raise ValueError sinon (transformee en {"error": "validation"} par
+    call_tool).
+    """
+    if not isinstance(value, str):
+        raise ValueError(
+            "id_parcelle doit etre une string, "
+            f"recu {type(value).__name__}"
+        )
+    s = value.strip().upper()
+    if not _ID_PARCELLE_REGEX.match(s):
+        raise ValueError(
+            f"id_parcelle invalide : {value!r}. Format attendu : 14 "
+            "caractères alphanumériques majuscules, ex '75104000AA0123' "
+            "(5 commune + 3 prefix + 2 section + 4 numero)."
+        )
+    return s
+
+
+async def get_parcelle_by_id(
+    arguments: dict[str, Any],
+    *,
+    client: httpx.AsyncClient | None = None,
+) -> dict[str, Any]:
+    """GET /v1/parcelles/{id_parcelle} : lookup direct cadastre DGFiP.
+
+    Retourne le contexte complet d'une parcelle : centroïde + contenance +
+    commune + permis historiques associés + polygon GeoJSON si dispo +
+    bâtiments existants count si polygon dispo. Plan Pro+ uniquement.
+    Coût quota : 1 + 1 par permis retourné (composite).
+    """
+    id_parcelle = _validate_id_parcelle(arguments.get("id_parcelle"))
+    return await _http_get(f"/v1/parcelles/{id_parcelle}", client=client)
+
+
 async def get_permit_full_view(
     arguments: dict[str, Any],
     *,
@@ -968,6 +1059,7 @@ TOOL_HANDLERS = {
     "get_risks": get_risks,
     "get_parcelle_geometry": get_parcelle_geometry,
     "get_existing_buildings": get_existing_buildings,
+    "get_parcelle_by_id": get_parcelle_by_id,
     "fuzzy_search_addresses": fuzzy_search_addresses,
     "bulk_enrich_list": bulk_enrich_list,
     "get_permit_full_view": get_permit_full_view,
