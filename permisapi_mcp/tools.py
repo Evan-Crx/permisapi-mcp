@@ -4,7 +4,7 @@ Cette couche est testable sans avoir le `mcp` package installé : on
 mock juste httpx ou on utilise MockTransport. Le server.py construit
 les Tool MCP à partir d'ici.
 
-12 tools exposés :
+13 tools exposés :
   1. search_permits         : GET /v1/permits avec filtres (Free)
   2. get_permit_details     : GET /v1/permits/{num_pa} (Free)
   3. find_dvf_neighbors     : GET /v1/permits/{num_pa}/dvf (Pro, 12 ans)
@@ -14,9 +14,10 @@ les Tool MCP à partir d'ici.
   7. get_parcelle_geometry  : GET /v1/permits/{num_pa}/parcelle (Pro, cadastre DGFiP)
   8. get_existing_buildings : GET /v1/permits/{num_pa}/batiments-existants (Pro, terrain nu vs bâti)
   9. get_parcelle_by_id     : GET /v1/parcelles/{id_parcelle} (Pro, lookup direct cadastre DGFiP)
-  10. bulk_enrich_list       : POST /v1/permits/bulk-enrich (Business, croise liste client)
-  11. fuzzy_search_addresses : GET /v1/search?q=text (Free, pg_trgm fuzzy)
-  12. get_permit_full_view  : GET /v1/permits/{num_pa}/360 (Pro, composite 6-en-1)
+  10. search_permits_in_polygon : POST /v1/permits/inside-polygon (Business, ZAC custom)
+  11. bulk_enrich_list       : POST /v1/permits/bulk-enrich (Business, croise liste client)
+  12. fuzzy_search_addresses : GET /v1/search?q=text (Free, pg_trgm fuzzy)
+  13. get_permit_full_view  : GET /v1/permits/{num_pa}/360 (Pro, composite 6-en-1)
 
 Sécurité : la clé API du user est lue depuis l'env PERMISAPI_KEY au
 démarrage du serveur, jamais transmise via les arguments d'un tool.
@@ -103,7 +104,7 @@ async def _http_get(
     headers = {
         "X-API-Key": _api_key(),
         "Accept": "application/json",
-        "User-Agent": "permisapi-mcp/0.5.2",
+        "User-Agent": "permisapi-mcp/0.5.3",
     }
     own_client = client is None
     c = client or httpx.AsyncClient(timeout=HTTP_TIMEOUT)
@@ -135,7 +136,7 @@ async def _http_post(
         "X-API-Key": _api_key(),
         "Accept": "application/json",
         "Content-Type": "application/json",
-        "User-Agent": "permisapi-mcp/0.5.2",
+        "User-Agent": "permisapi-mcp/0.5.3",
     }
     own_client = client is None
     c = client or httpx.AsyncClient(timeout=HTTP_TIMEOUT)
@@ -627,6 +628,103 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "search_permits_in_polygon",
+        "description": (
+            "Recherche les permis de construire dont le point géocodé est "
+            "à l'intérieur d'un polygone GeoJSON custom fourni par "
+            "l'utilisateur. Killer feature foncière pour les ZAC (Zone "
+            "d'Aménagement Concerté), ZA, périmètres d'opération propTech, "
+            "zones de chasse marchand de biens hors limites administratives "
+            "commune / département. Use case typique : 'donne-moi tous les "
+            "permis logement avec un Score MDB >= 70 dans ce polygone que "
+            "je viens de dessiner sur la carte'. Plan Business+ uniquement "
+            "(Pro 199 EUR reste sur les 14 filtres administratifs standard "
+            "de search_permits). Limite surface 1 000 km² (anti-abus). "
+            "Coût quota : max(2, nombre de permis retournés) cohérent avec "
+            "le pattern composite. Filtres additionnels combinables : "
+            "dep_code (pré-filtre index, gain perf si polygon vaste), "
+            "permit_type, min_an_depot / max_an_depot, min_score MDB v0.3. "
+            "Retourne items + count + polygon_surface_km2 + polygon_center "
+            "lat/lng (utile pour centrer une carte sur la zone) + "
+            "filters_applied (echo des filtres pour debug). Polygon format "
+            "GeoJSON RFC 7946 strict : `type: 'Polygon'`, `coordinates: "
+            "[[[lng, lat], ...]]` avec anneau extérieur fermé (1er == "
+            "dernier point, minimum 4 points). MultiPolygon non supporté "
+            "en V1. Coordonnées WGS84 EPSG:4326."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "polygon": {
+                    "type": "object",
+                    "description": (
+                        "Polygon GeoJSON RFC 7946. Format strict : "
+                        "`{type: 'Polygon', coordinates: [[[lng, lat], ...]]}` "
+                        "avec anneau extérieur fermé (1er point == dernier "
+                        "point, minimum 4 points). Exemple ZAC Paris 4e : "
+                        "`{type: 'Polygon', coordinates: [[[2.34, 48.85], "
+                        "[2.36, 48.85], [2.36, 48.87], [2.34, 48.87], "
+                        "[2.34, 48.85]]]}`. Surface max 1 000 km²."
+                    ),
+                    "properties": {
+                        "type": {
+                            "type": "string",
+                            "enum": ["Polygon"],
+                            "description": "Doit etre 'Polygon' (MultiPolygon non supporté en V1)."
+                        },
+                        "coordinates": {
+                            "type": "array",
+                            "description": "Liste de rings (anneau extérieur + trous optionnels). Chaque ring est une liste de points [lng, lat] fermée."
+                        }
+                    },
+                    "required": ["type", "coordinates"]
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 500,
+                    "default": 100,
+                    "description": "Nombre max de permits retournés (1-500). Default 100."
+                },
+                "dep_code": {
+                    "type": "string",
+                    "description": "Filtre additionnel : code département INSEE (ex '75'). Recommandé si polygon vaste : pré-filtre via index pour gain perf majeur."
+                },
+                "permit_type": {
+                    "type": "string",
+                    "enum": [
+                        "PC_LOGEMENT",
+                        "PC_LOCAUX",
+                        "PA",
+                        "PD",
+                        "DP_LOGEMENT",
+                        "DP_LOCAUX"
+                    ],
+                    "description": "Filtre type de permis."
+                },
+                "min_an_depot": {
+                    "type": "integer",
+                    "minimum": 2010,
+                    "maximum": 2030,
+                    "description": "Année dépôt minimum (inclusif). Sitadel couvre 2014-2026."
+                },
+                "max_an_depot": {
+                    "type": "integer",
+                    "minimum": 2010,
+                    "maximum": 2030,
+                    "description": "Année dépôt maximum (inclusif)."
+                },
+                "min_score": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 100,
+                    "description": "Filtre Score MDB v0.3 minimum (0-100). Très utile combiné au polygon ZAC pour ne retourner que les permis à fort potentiel marchand de biens."
+                }
+            },
+            "required": ["polygon"]
+        }
+    },
+    {
         "name": "bulk_enrich_list",
         "description": (
             "Croisez une liste fournie par l'utilisateur (max 1000 lignes) "
@@ -1029,6 +1127,40 @@ async def get_parcelle_by_id(
     return await _http_get(f"/v1/parcelles/{id_parcelle}", client=client)
 
 
+async def search_permits_in_polygon(
+    arguments: dict[str, Any],
+    *,
+    client: httpx.AsyncClient | None = None,
+) -> dict[str, Any]:
+    """POST /v1/permits/inside-polygon : permits dans un polygone GeoJSON.
+
+    Use case foncier : ZAC, ZA, périmètre opération, zone de chasse
+    marchand de biens. Plan Business+ uniquement. Coût quota :
+    max(2, len(rows)) composite. Limite surface 1000 km² anti-abus.
+    """
+    polygon = arguments.get("polygon")
+    if not isinstance(polygon, dict):
+        raise ValueError(
+            "polygon est requis et doit etre un objet GeoJSON "
+            "(type='Polygon', coordinates=[[[lng, lat], ...]])"
+        )
+
+    body: dict[str, Any] = {"polygon": polygon}
+    limit = arguments.get("limit")
+    if isinstance(limit, int) and 1 <= limit <= 500:
+        body["limit"] = limit
+    for key in ("dep_code", "permit_type"):
+        val = arguments.get(key)
+        if isinstance(val, str) and val.strip():
+            body[key] = val.strip()
+    for key in ("min_an_depot", "max_an_depot", "min_score"):
+        val = arguments.get(key)
+        if isinstance(val, int):
+            body[key] = val
+
+    return await _http_post("/v1/permits/inside-polygon", json=body, client=client)
+
+
 async def get_permit_full_view(
     arguments: dict[str, Any],
     *,
@@ -1060,6 +1192,7 @@ TOOL_HANDLERS = {
     "get_parcelle_geometry": get_parcelle_geometry,
     "get_existing_buildings": get_existing_buildings,
     "get_parcelle_by_id": get_parcelle_by_id,
+    "search_permits_in_polygon": search_permits_in_polygon,
     "fuzzy_search_addresses": fuzzy_search_addresses,
     "bulk_enrich_list": bulk_enrich_list,
     "get_permit_full_view": get_permit_full_view,
