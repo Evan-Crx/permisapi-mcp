@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "permisapi-mcp"
-version = "0.5.3"
-description = "Serveur MCP pour PermisAPI : 13 outils pour consulter 1,2 M+ permis de construire de France (2014-2026) depuis Claude Desktop, Cursor, Windsurf et tout client MCP-compatible. v0.5.3 ajoute le tool search_permits_in_polygon (recherche permis dans un polygone GeoJSON custom, killer feature foncière ZAC plan Business+) pour le sprint 10 cadastre Prio 5."
+version = "0.5.4"
+description = "Serveur MCP pour PermisAPI : 14 outils pour consulter 1,2 M+ permis de construire de France (2014-2026) depuis Claude Desktop, Cursor, Windsurf et tout client MCP-compatible. v0.5.4 ajoute le tool get_commune_density_stats (stats macro densité urbaine par commune : parcelles + bâtiments + permits + distribution Score MDB, plan Business+) pour le sprint 10 cadastre Prio 7."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }

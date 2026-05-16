@@ -4,7 +4,7 @@ Cette couche est testable sans avoir le `mcp` package installé : on
 mock juste httpx ou on utilise MockTransport. Le server.py construit
 les Tool MCP à partir d'ici.
 
-13 tools exposés :
+14 tools exposés :
   1. search_permits         : GET /v1/permits avec filtres (Free)
   2. get_permit_details     : GET /v1/permits/{num_pa} (Free)
   3. find_dvf_neighbors     : GET /v1/permits/{num_pa}/dvf (Pro, 12 ans)
@@ -15,9 +15,10 @@ les Tool MCP à partir d'ici.
   8. get_existing_buildings : GET /v1/permits/{num_pa}/batiments-existants (Pro, terrain nu vs bâti)
   9. get_parcelle_by_id     : GET /v1/parcelles/{id_parcelle} (Pro, lookup direct cadastre DGFiP)
   10. search_permits_in_polygon : POST /v1/permits/inside-polygon (Business, ZAC custom)
-  11. bulk_enrich_list       : POST /v1/permits/bulk-enrich (Business, croise liste client)
-  12. fuzzy_search_addresses : GET /v1/search?q=text (Free, pg_trgm fuzzy)
-  13. get_permit_full_view  : GET /v1/permits/{num_pa}/360 (Pro, composite 6-en-1)
+  11. get_commune_density_stats : GET /v1/stats/commune/{code}/density (Business, BI agrégé)
+  12. bulk_enrich_list       : POST /v1/permits/bulk-enrich (Business, croise liste client)
+  13. fuzzy_search_addresses : GET /v1/search?q=text (Free, pg_trgm fuzzy)
+  14. get_permit_full_view  : GET /v1/permits/{num_pa}/360 (Pro, composite 6-en-1)
 
 Sécurité : la clé API du user est lue depuis l'env PERMISAPI_KEY au
 démarrage du serveur, jamais transmise via les arguments d'un tool.
@@ -104,7 +105,7 @@ async def _http_get(
     headers = {
         "X-API-Key": _api_key(),
         "Accept": "application/json",
-        "User-Agent": "permisapi-mcp/0.5.3",
+        "User-Agent": "permisapi-mcp/0.5.4",
     }
     own_client = client is None
     c = client or httpx.AsyncClient(timeout=HTTP_TIMEOUT)
@@ -136,7 +137,7 @@ async def _http_post(
         "X-API-Key": _api_key(),
         "Accept": "application/json",
         "Content-Type": "application/json",
-        "User-Agent": "permisapi-mcp/0.5.3",
+        "User-Agent": "permisapi-mcp/0.5.4",
     }
     own_client = client is None
     c = client or httpx.AsyncClient(timeout=HTTP_TIMEOUT)
@@ -725,6 +726,49 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         }
     },
     {
+        "name": "get_commune_density_stats",
+        "description": (
+            "Stats macro de densité urbaine pour une commune en un seul "
+            "appel : nombre de parcelles cadastrales DGFiP + surface "
+            "totale + nombre de bâtiments cadastraux (bâti dur / léger / "
+            "autre) + nombre de permits historiques 2014-2026 ventilés par "
+            "année, par type (PC_LOGEMENT, PC_LOCAUX, PA, PD, DP) et par "
+            "distribution Score MDB v0.3 (low / medium / high / premium) "
+            "+ indicateur de densité (bâtiments par km² + tier "
+            "tres_dense / dense / moyen / faible). Use cases : SEO "
+            "programmatique 35 000 communes France entière, analytics "
+            "macro pour marchands de biens / promoteurs / banques en "
+            "veille marché, comparaison de zones avant décision foncière. "
+            "PLM mapping automatique : pour les arrondissements de Paris "
+            "(75101-75120), Lyon (69381-69389), Marseille (13201-13216), "
+            "les permits Sitadel stockés sur la ville-mère sont agrégés "
+            "automatiquement. Plan Business+ uniquement (BI agrégée, pas "
+            "soumise au scope géographique Free/Explorer). Coût quota : "
+            "3 unités composite. Sources : cadastre.data.gouv.fr Etalab "
+            "+ Sitadel SDES."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "commune_code": {
+                    "type": "string",
+                    "pattern": "^[0-9A-Z]{5}$",
+                    "minLength": 5,
+                    "maxLength": 5,
+                    "description": (
+                        "Code INSEE 5 caractères alphanumériques majuscules "
+                        "de la commune. Exemples : '75104' Paris 4e, '33063' "
+                        "Bordeaux, '69384' Lyon 4e, '2A004' Ajaccio (Corse). "
+                        "Pour les villes-mères PLM utiliser '75056' Paris, "
+                        "'69123' Lyon, '13055' Marseille (agrège tous les "
+                        "arrondissements côté permits)."
+                    )
+                }
+            },
+            "required": ["commune_code"]
+        }
+    },
+    {
         "name": "bulk_enrich_list",
         "description": (
             "Croisez une liste fournie par l'utilisateur (max 1000 lignes) "
@@ -1127,6 +1171,43 @@ async def get_parcelle_by_id(
     return await _http_get(f"/v1/parcelles/{id_parcelle}", client=client)
 
 
+_COMMUNE_CODE_REGEX = re.compile(r"^[0-9A-Z]{5}$")
+
+
+def _validate_commune_code(value: Any) -> str:
+    """Valide un commune_code INSEE : str 5 chars alphanumériques majuscules."""
+    if not isinstance(value, str):
+        raise ValueError(
+            "commune_code doit etre une string, "
+            f"recu {type(value).__name__}"
+        )
+    s = value.strip().upper()
+    if not _COMMUNE_CODE_REGEX.match(s):
+        raise ValueError(
+            f"commune_code invalide : {value!r}. Format attendu : 5 "
+            "caractères alphanumériques majuscules INSEE, ex '75104' "
+            "(Paris 4e) ou '2A004' (Ajaccio)."
+        )
+    return s
+
+
+async def get_commune_density_stats(
+    arguments: dict[str, Any],
+    *,
+    client: httpx.AsyncClient | None = None,
+) -> dict[str, Any]:
+    """GET /v1/stats/commune/{code}/density : stats densité urbaine commune.
+
+    Agrège parcelles + bâtiments + permits historiques + Score MDB
+    distribution en un seul appel. Plan Business+ uniquement. Coût quota
+    composite 3 unités.
+    """
+    commune_code = _validate_commune_code(arguments.get("commune_code"))
+    return await _http_get(
+        f"/v1/stats/commune/{commune_code}/density", client=client
+    )
+
+
 async def search_permits_in_polygon(
     arguments: dict[str, Any],
     *,
@@ -1193,6 +1274,7 @@ TOOL_HANDLERS = {
     "get_existing_buildings": get_existing_buildings,
     "get_parcelle_by_id": get_parcelle_by_id,
     "search_permits_in_polygon": search_permits_in_polygon,
+    "get_commune_density_stats": get_commune_density_stats,
     "fuzzy_search_addresses": fuzzy_search_addresses,
     "bulk_enrich_list": bulk_enrich_list,
     "get_permit_full_view": get_permit_full_view,
