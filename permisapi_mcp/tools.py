@@ -23,14 +23,25 @@ Pas de risque qu'un LLM puisse "leaker" la clé dans une réponse.
 """
 from __future__ import annotations
 
+import contextvars
 import json
 import os
-from typing import Any
+from contextlib import contextmanager
+from typing import Any, Iterator
 
 import httpx
 
 PERMISAPI_BASE = os.environ.get("PERMISAPI_BASE_URL", "https://api.permisapi.fr")
 HTTP_TIMEOUT = 15.0
+
+
+# Context var pour scoper la clé API à la requête courante.
+# Mode stdio (Claude Desktop) : continue d'utiliser PERMISAPI_KEY en env var.
+# Mode SSE hosted : le serveur extrait la clé du header Authorization de
+# chaque requête HTTP et la pousse ici via `use_api_key()`.
+_current_api_key: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "permisapi_key", default=None
+)
 
 
 class PermisapiError(Exception):
@@ -42,8 +53,34 @@ class PermisapiError(Exception):
         super().__init__(f"PermisAPI {status_code} : {detail}")
 
 
+@contextmanager
+def use_api_key(key: str) -> Iterator[None]:
+    """Scope la clé PermisAPI au temps d'un appel MCP.
+
+    Utilisé par le serveur SSE hosted pour injecter la clé extraite du
+    header Authorization de la requête entrante. Restore proprement la
+    valeur précédente à la sortie du with, sûr en concurrent (ContextVar
+    est async-safe et thread-safe).
+    """
+    token = _current_api_key.set(key)
+    try:
+        yield
+    finally:
+        _current_api_key.reset(token)
+
+
 def _api_key() -> str:
-    """Lit la clé PermisAPI depuis l'env. Raise si absente."""
+    """Résout la clé PermisAPI à partir du contexte courant.
+
+    Ordre de priorité :
+    1. ContextVar `_current_api_key` (mode SSE hosted)
+    2. Env var `PERMISAPI_KEY` (mode stdio Claude Desktop / Cursor)
+
+    Raise RuntimeError si aucune source.
+    """
+    key = _current_api_key.get()
+    if key:
+        return key
     key = os.environ.get("PERMISAPI_KEY")
     if not key:
         raise RuntimeError(
@@ -64,7 +101,7 @@ async def _http_get(
     headers = {
         "X-API-Key": _api_key(),
         "Accept": "application/json",
-        "User-Agent": "permisapi-mcp/0.5.0",
+        "User-Agent": "permisapi-mcp/0.5.1",
     }
     own_client = client is None
     c = client or httpx.AsyncClient(timeout=HTTP_TIMEOUT)
@@ -96,7 +133,7 @@ async def _http_post(
         "X-API-Key": _api_key(),
         "Accept": "application/json",
         "Content-Type": "application/json",
-        "User-Agent": "permisapi-mcp/0.5.0",
+        "User-Agent": "permisapi-mcp/0.5.1",
     }
     own_client = client is None
     c = client or httpx.AsyncClient(timeout=HTTP_TIMEOUT)
@@ -129,7 +166,13 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "Recherche des permis de construire de France avec filtres "
             "combinables : département, commune, type de permis, état, "
             "dates, surface min, SIREN demandeur. Retourne une page de "
-            "permits avec leurs infos de base. Plan Free OK."
+            "permits avec leurs infos de base. Plan Free OK. "
+            "**Coût quota = nombre de permits retournés** (max `limit`, "
+            "min 1). Exemple : limit=20 et 15 permits matchent => 15 "
+            "unités décomptées. Anti-exfiltration depuis 2026-05-16 : si "
+            "tu cherches a couvrir un département entier, prefere une "
+            "page raisonnable (limit=10-20) et arrete-toi quand l'user a "
+            "ce qu'il veut, plutôt que paginer agressivement."
         ),
         "inputSchema": {
             "type": "object",
@@ -149,6 +192,14 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                         "DP_LOGEMENT", "DP_LOCAUX",
                         "PA", "PD",
                     ],
+                    "description": (
+                        "Type Sitadel du permis : `PC_LOGEMENT` (permis "
+                        "de construire logement), `PC_LOCAUX` (PC locaux "
+                        "commerciaux/industriels), `DP_LOGEMENT` "
+                        "(déclaration préalable logement), `DP_LOCAUX` "
+                        "(DP locaux), `PA` (permis d'aménager : "
+                        "lotissements), `PD` (permis de démolir)."
+                    ),
                 },
                 "etat_pa": {
                     "type": "integer",
@@ -168,10 +219,14 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                     "type": "string",
                     "description": (
                         "Tri du résultat. Champs autorisés : "
-                        "date_reelle_autorisation, date_depot, an_depot, "
-                        "superficie_terrain. Préfixe '-' pour descendant "
-                        "(ex '-superficie_terrain' pour les plus grandes "
-                        "surfaces en premier). Défaut '-date_reelle_autorisation'."
+                        "date_reelle_autorisation, an_depot, "
+                        "superficie_terrain. Alias acceptés : date_decision, "
+                        "date, year (remappés vers date_reelle_autorisation), "
+                        "date_depot (remappé vers an_depot, granularité année "
+                        "car Sitadel SDES ne publie pas la date complète de "
+                        "dépôt). Préfixe '-' pour descendant (ex "
+                        "'-superficie_terrain' pour les plus grandes surfaces "
+                        "en premier). Défaut '-date_reelle_autorisation'."
                     ),
                 },
                 "min_score": {
@@ -220,23 +275,58 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                         "opportunités MDB."
                     ),
                 },
-                "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 20},
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 50,
+                    "default": 20,
+                    "description": (
+                        "Nombre max de permits retournés par appel. Tri "
+                        "par défaut sur date_reelle_autorisation desc "
+                        "(les plus récents en tête). Coût quota = nombre "
+                        "réel de permits retournés (max `limit`, min 1). "
+                        "Pour Free 500 unités/mois, prefere limit=10-20 et "
+                        "stoppe quand l'user a ce qu'il veut au lieu de "
+                        "paginer agressivement."
+                    ),
+                },
             },
         },
     },
     {
         "name": "get_permit_details",
         "description": (
-            "Recupere tous les détails d'un permis a partir de son "
-            "identifiant Sitadel (num_pa) : adresse complète, demandeur, "
-            "dates, surface, parcelle cadastre, lat/lng. Plan Free OK."
+            "Récupère TOUS les détails connus d'un permis à partir de son "
+            "identifiant Sitadel `num_pa`. Behavior : appelle "
+            "`GET /v1/permits/{num_pa}` qui retourne l'adresse postale "
+            "complète, la commune INSEE, le code département, les dates "
+            "(dépôt, décision réelle d'autorisation, DAACT), la surface "
+            "du terrain en m², l'état administratif (Accordé / Tacite / "
+            "Refusé...), le type de permis (PC_LOGEMENT, DP_LOCAUX, PA, "
+            "PD...), les coordonnées GPS lat/lng géocodées, et la "
+            "référence cadastrale (sec_cadastre1 + num_cadastre1). "
+            "Purpose : à utiliser quand l'user fournit un `num_pa` "
+            "spécifique et veut tout savoir dessus en 1 appel. Usage "
+            "guideline : préfère ce tool à `search_permits` quand "
+            "l'identifiant est connu (1 unité quota au lieu de N). "
+            "Coût : 1 unité quota. Plan Free OK (dans le scope géo de "
+            "l'user)."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "num_pa": {
                     "type": "string",
-                    "description": "Identifiant Sitadel unique (ex PC07404021K1).",
+                    "description": (
+                        "Identifiant Sitadel unique du permis. Format : 13 "
+                        "caractères alphanumériques sans préfixe (ex "
+                        "`0930662500027` pour un permis Seine-Saint-Denis). "
+                        "Pas de slashes, pas d'espaces. À récupérer via "
+                        "`search_permits` ou `fuzzy_search_addresses` si "
+                        "l'user fournit juste une adresse."
+                    ),
+                    "minLength": 1,
+                    "maxLength": 50,
                 },
             },
             "required": ["num_pa"],
@@ -245,20 +335,71 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "name": "find_dvf_neighbors",
         "description": (
-            "Pour un permis, retourne les top transactions immobilieres "
-            "DVF voisines (5 ans glissants). Permet d'estimer la valeur "
-            "fonciere du quartier. Plan Pro+ uniquement."
+            "Retourne les top N transactions immobilières DVF voisines "
+            "du permis (12 ans glissants : Geo-DVF Etalab 2021-2025 + "
+            "Cerema DVF+ 2014-2020 fusionnés). Behavior : appelle "
+            "`GET /v1/permits/{num_pa}/dvf` qui fait une jointure spatiale "
+            "via les coordonnées GPS du permis et retourne les ventes "
+            "passées sur des biens proches avec leur prix, date, type "
+            "(maison/appartement/dépendance/local commercial), surface, "
+            "nombre de pièces et distance en mètres. Filtre côté serveur "
+            "les transactions < 1000 EUR (donations DGFiP). Purpose : "
+            "estimer le prix au m² du quartier pour un marchand de biens, "
+            "calibrer une offre d'achat, vérifier la cohérence DVF avec un "
+            "prix annoncé. Usage guideline : `limit=3` est généralement "
+            "suffisant pour un rapide check ; `limit=5` pour une moyenne "
+            "plus robuste. Filtre `type_local=1,2` pour exclure les "
+            "dépendances/locaux commerciaux si l'user vise du résidentiel. "
+            "Coût : 1 unité quota. Plan Pro+ uniquement (Free/Explorer "
+            "reçoivent 402)."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "num_pa": {"type": "string"},
-                "limit": {"type": "integer", "minimum": 1, "maximum": 5, "default": 3},
+                "num_pa": {
+                    "type": "string",
+                    "description": (
+                        "Identifiant Sitadel unique du permis (ex "
+                        "`0930662500027`). 13 caractères alphanumériques."
+                    ),
+                    "minLength": 1,
+                    "maxLength": 50,
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 5,
+                    "default": 3,
+                    "description": (
+                        "Nombre max de transactions DVF voisines à "
+                        "retourner. Tri par distance croissante. Défaut 3 "
+                        "(suffit pour un rapide check). Max 5 pour ce tool "
+                        "(les transactions au-delà des 5 plus proches "
+                        "perdent en pertinence)."
+                    ),
+                },
                 "type_local": {
                     "type": "string",
-                    "description": "CSV des types : 1=Maison, 2=Appartement, 3=Dependance, 4=Local commercial.",
+                    "description": (
+                        "Filtre par type de bien immobilier DVF (CSV "
+                        "accepté). Codes DGFiP : `1`=Maison, `2`=Appartement, "
+                        "`3`=Dépendance (annexes type garage / cave), "
+                        "`4`=Local industriel/commercial. Exemple `1,2` "
+                        "pour ne garder que maisons + appartements. Omettre "
+                        "pour tous types."
+                    ),
                 },
-                "min_year": {"type": "integer", "minimum": 2014, "maximum": 2100},
+                "min_year": {
+                    "type": "integer",
+                    "minimum": 2014,
+                    "maximum": 2100,
+                    "description": (
+                        "Année minimum de la transaction (filtre les "
+                        "transactions plus anciennes). Exemple `2020` "
+                        "= seulement 2020-2026. Omettre pour avoir les "
+                        "12 ans complets (2014-2026)."
+                    ),
+                },
             },
             "required": ["num_pa"],
         },
@@ -266,14 +407,37 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "name": "get_mdb_score",
         "description": (
-            "Calcule le Score Opportunité Marchand de Biens v0.1 pour "
-            "un permis (note 0-100 + tier low/medium/high/premium + "
-            "breakdown de 7 signaux ponderes). Plan Pro+ uniquement."
+            "Calcule (ou récupère depuis le cache materialisé daily) le "
+            "Score Opportunité Marchand de Biens **v0.3** d'un permis. "
+            "Behavior : appelle `GET /v1/permits/{num_pa}/score` qui "
+            "retourne une note 0-100 + tier (`low` / `medium` / `high` / "
+            "`premium`) + breakdown des 11 signaux pondérés (dvf_density, "
+            "dvf_value, plu_constructible, plu_zone_type, risk_score, "
+            "sirene_quality, building_density, surface, type_permit, "
+            "etat_admin, dep_focus) avec leur poids et contribution au "
+            "score final. Inclut `version: \"v0.3\"`, `method: "
+            "\"materialise (precomputed)\"` quand le score vient du cron "
+            "daily 04h UTC (le cas typique), ou `live` quand recalculé à "
+            "la demande. Purpose : aider un marchand de biens à shortlister "
+            "les permis à fort potentiel value-add sans inspecter chaque "
+            "permis manuellement. Usage guideline : un score >= 70 est "
+            "généralement worth investigating, >= 85 est top-tier "
+            "(`premium`). Combine avec `find_dvf_neighbors` pour valider "
+            "la justification prix terrain. Coût : 1 unité quota. Plan "
+            "Pro+ uniquement (Free/Explorer reçoivent 402)."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "num_pa": {"type": "string"},
+                "num_pa": {
+                    "type": "string",
+                    "description": (
+                        "Identifiant Sitadel unique du permis (ex "
+                        "`0930662500027`). 13 caractères alphanumériques."
+                    ),
+                    "minLength": 1,
+                    "maxLength": 50,
+                },
             },
             "required": ["num_pa"],
         },
@@ -281,15 +445,39 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "name": "get_plu_zoning",
         "description": (
-            "Retourne le zonage urbanisme PLU au point géocodé du permis "
-            "(UA/UB urbain, AU a urbaniser, A agricole, N naturelle) avec "
-            "verdict booleen constructible et raison juridique. Source "
-            "Geoportail de l'Urbanisme. Plan Pro+ uniquement."
+            "Retourne le zonage urbanisme PLU/POS au point GPS géocodé du "
+            "permis. Behavior : appelle "
+            "`GET /v1/permits/{num_pa}/plu` qui interroge le Géoportail de "
+            "l'Urbanisme (apicarto.ign.fr) ou retourne le cache local si "
+            "déjà fetché. Retourne : `zonage.code` brut (ex `UAa`, `UG`, "
+            "`AU1`, `Nh`...), `zonage.libelle` lisible (ex `Zone urbaine "
+            "centrale`), `zonage.type_zone` normalisé (`U` urbain "
+            "constructible / `AU` à urbaniser / `A` agricole non "
+            "constructible / `N` naturelle non constructible), "
+            "`zonage.constructible` booléen avec raison juridique, "
+            "`zonage.plu_revision_date` date dernière révision PLU. "
+            "Purpose : vérifier qu'un projet est constructible avant tout "
+            "investissement, identifier les zones à urbaniser (AU) où "
+            "investir en amont. Usage guideline : si `has_plu=false` la "
+            "commune n'a pas encore digitalisé son PLU (20% des communes "
+            "FR en 2026, surtout rural) ; dans ce cas RNU s'applique par "
+            "défaut. Coût : 1 unité quota. Plan Pro+ uniquement "
+            "(Free/Explorer reçoivent 402)."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "num_pa": {"type": "string"},
+                "num_pa": {
+                    "type": "string",
+                    "description": (
+                        "Identifiant Sitadel unique du permis (ex "
+                        "`0930662500027`). 13 caractères alphanumériques. "
+                        "Le permis doit être géocodé (lat/lng connus) "
+                        "sinon 404."
+                    ),
+                    "minLength": 1,
+                    "maxLength": 50,
+                },
             },
             "required": ["num_pa"],
         },
@@ -297,15 +485,45 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "name": "get_risks",
         "description": (
-            "Risques naturels et technologiques (inondation, seisme, "
-            "argile, ICPE proches) connus sur la commune du permis. "
-            "Score agrege 0-100 + tier. Source Géorisques BRGM. Plan "
-            "Pro+ uniquement."
+            "Retourne les risques naturels et technologiques connus sur la "
+            "commune du permis selon Géorisques BRGM. Behavior : appelle "
+            "`GET /v1/permits/{num_pa}/risks` qui retourne un score agrégé "
+            "0-100 (`risk_score`), un tier qualitatif (`risk_tier` : "
+            "`low` / `moderate` / `high` / `critical`) et une liste des "
+            "risques détectés avec leur code Géorisques. Codes possibles : "
+            "`INONDATION` (zone inondable PPRi), `MVT` (mouvement de "
+            "terrain / argile), `SEISME` (zone sismique 2-5), `CYCLONE` "
+            "(DOM), `INDUSTRIEL` (ICPE / Seveso à proximité), `RADON` "
+            "(potentiel radon catégorie 3), `FEUX_FORET` (PPR feux), "
+            "`AVALANCHE`, `NUCLEAIRE` (proximité PPI INB). Chaque risque "
+            "inclut `has_ppr` (Plan de Prévention des Risques opposable) "
+            "et `ppr_type` (Inondation / Mouvement / Technologique / "
+            "etc.). Purpose : informer un acheteur/promoteur des risques "
+            "réglementaires qui peuvent affecter la valeur ou la "
+            "constructibilité, alimenter l'IAL (Information Acquéreur "
+            "Locataire) obligatoire depuis 2006. Use case marchand de "
+            "biens : exclure les permis en zone inondable ou Seveso. "
+            "Usage guideline : un `risk_tier=high` signale 3+ risques "
+            "majeurs avec PPR opposable, vérifier l'éligibilité assurance. "
+            "Source : api-prim.developpement-durable.gouv.fr (Géorisques "
+            "BRGM officiel). Coût : 1 unité quota. Plan Pro+ uniquement "
+            "(Free/Explorer reçoivent 402)."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "num_pa": {"type": "string"},
+                "num_pa": {
+                    "type": "string",
+                    "description": (
+                        "Identifiant Sitadel unique du permis (ex "
+                        "`0930662500027`). 13 caractères alphanumériques. "
+                        "Le scoring est par commune (pas par parcelle), "
+                        "donc 2 permis dans la même commune retournent le "
+                        "même `risk_score`."
+                    ),
+                    "minLength": 1,
+                    "maxLength": 50,
+                },
             },
             "required": ["num_pa"],
         },
@@ -326,7 +544,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "properties": {
                 "num_pa": {
                     "type": "string",
-                    "description": "Identifiant Sitadel unique (ex PC07404021K1).",
+                    "description": "Identifiant Sitadel unique (ex 0930662500027).",
                 },
             },
             "required": ["num_pa"],
@@ -352,7 +570,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "properties": {
                 "num_pa": {
                     "type": "string",
-                    "description": "Identifiant Sitadel unique (ex PC07404021K1).",
+                    "description": "Identifiant Sitadel unique (ex 0930662500027).",
                 },
             },
             "required": ["num_pa"],
@@ -377,16 +595,77 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                     "type": "array",
                     "minItems": 1,
                     "maxItems": 1000,
+                    "description": (
+                        "Liste des lignes à enrichir (1 à 1000). Chaque "
+                        "ligne doit avoir un `ref` unique (echo dans la "
+                        "response) et au moins UN des 3 modes "
+                        "d'identification : `lat+lng` (coordonnées GPS "
+                        "WGS84), `adresse` (texte libre, geocodé via BAN), "
+                        "ou `commune+section+numero` (référence cadastrale "
+                        "DGFiP). Mixage possible : ligne 1 en lat/lng, "
+                        "ligne 2 en adresse, ligne 3 en cadastre."
+                    ),
                     "items": {
                         "type": "object",
                         "properties": {
-                            "ref": {"type": "string", "description": "Identifiant client (echo)"},
-                            "lat": {"type": "number"},
-                            "lng": {"type": "number"},
-                            "adresse": {"type": "string"},
-                            "commune": {"type": "string"},
-                            "section": {"type": "string"},
-                            "numero": {"type": "string"},
+                            "ref": {
+                                "type": "string",
+                                "description": (
+                                    "Identifiant client unique de la ligne "
+                                    "(echo dans la response pour matching). "
+                                    "Ex `MAISON-001`, `prospect-42`."
+                                ),
+                            },
+                            "lat": {
+                                "type": "number",
+                                "description": (
+                                    "Latitude WGS84 (mode coordonnées GPS). "
+                                    "Range -90 à 90, métropole FR ~41-51. "
+                                    "Doit être associé à `lng`."
+                                ),
+                            },
+                            "lng": {
+                                "type": "number",
+                                "description": (
+                                    "Longitude WGS84 (mode coordonnées). "
+                                    "Range -180 à 180, métropole FR ~-5 à "
+                                    "10. Doit être associé à `lat`."
+                                ),
+                            },
+                            "adresse": {
+                                "type": "string",
+                                "description": (
+                                    "Adresse postale libre (mode adresse). "
+                                    "Géocodage via API BAN data.gouv.fr. "
+                                    "Ex `12 rue de Rivoli 75001 Paris`. "
+                                    "Tolère typos et accents oubliés."
+                                ),
+                            },
+                            "commune": {
+                                "type": "string",
+                                "description": (
+                                    "Code INSEE 5 chars de la commune "
+                                    "(mode cadastre, ex `75056` pour "
+                                    "Paris). Combiner avec `section` et "
+                                    "`numero`."
+                                ),
+                            },
+                            "section": {
+                                "type": "string",
+                                "description": (
+                                    "Section cadastrale DGFiP (mode "
+                                    "cadastre, ex `AB`, `EH`, `XV`). "
+                                    "1 à 2 lettres typiquement."
+                                ),
+                            },
+                            "numero": {
+                                "type": "string",
+                                "description": (
+                                    "Numéro de parcelle DGFiP (mode "
+                                    "cadastre, ex `42`, `1318`). 1 à 4 "
+                                    "chiffres typiquement."
+                                ),
+                            },
                         },
                         "required": ["ref"],
                     },
@@ -396,12 +675,24 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                     "minimum": 10,
                     "maximum": 10000,
                     "default": 500,
+                    "description": (
+                        "Rayon en mètres autour du point résolu pour "
+                        "chercher les permis associés. Défaut 500m "
+                        "(typique zone résidentielle). Augmenter à 1000-"
+                        "2000m pour zone rurale, descendre à 100-200m "
+                        "pour zone urbaine dense."
+                    ),
                 },
                 "max_matches": {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 10,
                     "default": 3,
+                    "description": (
+                        "Nombre max de permits retournés par ligne. "
+                        "Défaut 3 (les 3 plus proches). Coût quota = "
+                        "len(rows) unités (pas multiplié par max_matches)."
+                    ),
                 },
             },
             "required": ["rows"],
@@ -415,8 +706,10 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "accents et à la casse, tolérant aux typos. Idéal pour "
             "trouver un permis quand on connaît l'adresse approximative "
             "mais pas le code postal ou commune INSEE précis. Tous "
-            "plans (avec respect du scope géo). Coût 1 unité quota. "
-            "Exemple : 'rue victor hugo paris', 'cours de l ile bordeaux'."
+            "plans (avec respect du scope géo). **Coût quota = nombre de "
+            "résultats retournés** (max `limit`, min 1). Anti-exfiltration "
+            "depuis 2026-05-16 (cohérent avec search_permits). Exemple : "
+            "'rue victor hugo paris', 'cours de l ile bordeaux'."
         ),
         "inputSchema": {
             "type": "object",
@@ -459,7 +752,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "properties": {
                 "num_pa": {
                     "type": "string",
-                    "description": "Identifiant Sitadel unique (ex PC07404021K1).",
+                    "description": "Identifiant Sitadel unique (ex 0930662500027).",
                 },
             },
             "required": ["num_pa"],

@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "permisapi-mcp"
-version = "0.5.0"
-description = "Serveur MCP pour PermisAPI : 11 outils pour consulter 1,2 M+ permis de construire de France (2014-2026) depuis Claude Desktop, Cursor, Windsurf et tout client MCP-compatible. v0.5.0 ajoute get_existing_buildings (terrain nu vs bâti)."
+version = "0.5.1"
+description = "Serveur MCP pour PermisAPI : 11 outils pour consulter 1,2 M+ permis de construire de France (2014-2026) depuis Claude Desktop, Cursor, Windsurf et tout client MCP-compatible. v0.5.1 enrichit les descriptions JSON Schema (Glama Tool Definition Quality B → A) et ajoute mention du Score MDB v0.3 + quota par lignes retournées."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -33,10 +33,16 @@ dependencies = [
 dev = [
     "pytest>=7.4",
     "pytest-asyncio>=0.23",
+    "httpx>=0.27",
+]
+sse = [
+    "starlette>=0.40",
+    "uvicorn[standard]>=0.30",
 ]
 
 [project.scripts]
 permisapi-mcp = "permisapi_mcp.server:main"
+permisapi-mcp-sse = "permisapi_mcp.sse_server:main"
 
 [project.urls]
 Homepage = "https://permisapi.fr/mcp"
