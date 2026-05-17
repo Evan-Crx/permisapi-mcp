@@ -19,4 +19,4 @@ Usage :
 Voir docs/MCP_SETUP.md pour le guide complet.
 """
 
-__version__ = "0.5.0"
+__version__ = "0.5.6"

@@ -4,21 +4,23 @@ Cette couche est testable sans avoir le `mcp` package installé : on
 mock juste httpx ou on utilise MockTransport. Le server.py construit
 les Tool MCP à partir d'ici.
 
-14 tools exposés :
+16 tools exposés :
   1. search_permits         : GET /v1/permits avec filtres (Free)
   2. get_permit_details     : GET /v1/permits/{num_pa} (Free)
   3. find_dvf_neighbors     : GET /v1/permits/{num_pa}/dvf (Pro, 12 ans)
   4. get_mdb_score          : GET /v1/permits/{num_pa}/score (Pro, v0.3 11 signaux)
-  5. get_plu_zoning         : GET /v1/permits/{num_pa}/plu (Pro)
-  6. get_risks              : GET /v1/permits/{num_pa}/risks (Pro)
-  7. get_parcelle_geometry  : GET /v1/permits/{num_pa}/parcelle (Pro, cadastre DGFiP)
-  8. get_existing_buildings : GET /v1/permits/{num_pa}/batiments-existants (Pro, terrain nu vs bâti)
-  9. get_parcelle_by_id     : GET /v1/parcelles/{id_parcelle} (Pro, lookup direct cadastre DGFiP)
-  10. search_permits_in_polygon : POST /v1/permits/inside-polygon (Business, ZAC custom)
-  11. get_commune_density_stats : GET /v1/stats/commune/{code}/density (Business, BI agrégé)
-  12. bulk_enrich_list       : POST /v1/permits/bulk-enrich (Business, croise liste client)
-  13. fuzzy_search_addresses : GET /v1/search?q=text (Free, pg_trgm fuzzy)
-  14. get_permit_full_view  : GET /v1/permits/{num_pa}/360 (Pro, composite 6-en-1)
+  5. get_score_explanation  : GET /v1/permits/{num_pa}/score/explain (Pro, transparence 11 signaux + interprétations FR)
+  6. get_plu_zoning         : GET /v1/permits/{num_pa}/plu (Pro)
+  7. get_risks              : GET /v1/permits/{num_pa}/risks (Pro)
+  8. get_parcelle_geometry  : GET /v1/permits/{num_pa}/parcelle (Pro, cadastre DGFiP)
+  9. get_existing_buildings : GET /v1/permits/{num_pa}/batiments-existants (Pro, terrain nu vs bâti)
+  10. get_parcelle_by_id     : GET /v1/parcelles/{id_parcelle} (Pro, lookup direct cadastre DGFiP)
+  11. search_permits_in_polygon : POST /v1/permits/inside-polygon (Business, ZAC custom)
+  12. get_commune_density_stats : GET /v1/stats/commune/{code}/density (Business, BI agrégé)
+  13. get_neighbor_parcels  : GET /v1/permits/{num_pa}/parcelles-voisines (Pro, pattern MDB local)
+  14. bulk_enrich_list       : POST /v1/permits/bulk-enrich (Business, croise liste client)
+  15. fuzzy_search_addresses : GET /v1/search?q=text (Free, pg_trgm fuzzy)
+  16. get_permit_full_view  : GET /v1/permits/{num_pa}/360 (Pro, composite 6-en-1)
 
 Sécurité : la clé API du user est lue depuis l'env PERMISAPI_KEY au
 démarrage du serveur, jamais transmise via les arguments d'un tool.
@@ -105,7 +107,7 @@ async def _http_get(
     headers = {
         "X-API-Key": _api_key(),
         "Accept": "application/json",
-        "User-Agent": "permisapi-mcp/0.5.4",
+        "User-Agent": "permisapi-mcp/0.5.6",
     }
     own_client = client is None
     c = client or httpx.AsyncClient(timeout=HTTP_TIMEOUT)
@@ -137,7 +139,7 @@ async def _http_post(
         "X-API-Key": _api_key(),
         "Accept": "application/json",
         "Content-Type": "application/json",
-        "User-Agent": "permisapi-mcp/0.5.4",
+        "User-Agent": "permisapi-mcp/0.5.6",
     }
     own_client = client is None
     c = client or httpx.AsyncClient(timeout=HTTP_TIMEOUT)
@@ -438,6 +440,51 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                     "description": (
                         "Identifiant Sitadel unique du permis (ex "
                         "`0930662500027`). 13 caractères alphanumériques."
+                    ),
+                    "minLength": 1,
+                    "maxLength": 50,
+                },
+            },
+            "required": ["num_pa"],
+        },
+    },
+    {
+        "name": "get_score_explanation",
+        "description": (
+            "Explication transparente du Score Opportunité Marchand de Biens "
+            "**v0.3** pour un permis. Behavior : appelle `GET /v1/permits/"
+            "{num_pa}/score/explain` qui retourne le score 0-100 + tier + "
+            "**les 11 signaux pondérés** avec pour chacun : son libellé FR, "
+            "sa doctrine (comment il est calculé en général), son poids "
+            "dans le score final, sa valeur calculée 0-100 pour CE permit, "
+            "sa contribution finale (valeur × poids), et **une interprétation "
+            "FR contextualisée** ('Démolition pure (PD) : top signal MDB', "
+            "'850 m² dans le sweet spot MDB', 'Risque critique : "
+            "rédhibitoire', etc.). Inclut aussi top 3 drivers (signaux qui "
+            "tirent le score vers le haut vs neutre 50) et top 3 drags "
+            "(signaux qui le tirent vers le bas) avec leur delta_vs_neutral. "
+            "Plus tous les inputs concrets utilisés (transparence totale : "
+            "permit_type, superficie_terrain, dep_code, denom_dem, "
+            "density_class, plu_zone_type, plu_constructible, risk_tier, "
+            "sirene_naf_prefix, nb_batiments_in_parcelle, etc.). Purpose : "
+            "audit du score 'pourquoi ce permis est noté 87 ?', "
+            "justification de décision MDB, due-diligence transparente. "
+            "Usage guideline : compléter get_mdb_score (qui donne juste le "
+            "score brut + tier) par get_score_explanation pour comprendre "
+            "le pourquoi et pouvoir justifier à un client / banquier / "
+            "partenaire. Coût : 2 unités quota (composite calcul + "
+            "interprétations). Plan Pro+ uniquement (Free/Explorer "
+            "reçoivent 402)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "num_pa": {
+                    "type": "string",
+                    "description": (
+                        "Identifiant Sitadel unique du permis (ex "
+                        "`0930662500027`). 13 caractères alphanumériques. "
+                        "Récupéré via `search_permits`."
                     ),
                     "minLength": 1,
                     "maxLength": 50,
@@ -769,6 +816,84 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         }
     },
     {
+        "name": "get_neighbor_parcels",
+        "description": (
+            "Retourne les parcelles cadastrales voisines d'un permis dans "
+            "un rayon configurable (10-2000 m, default 200 m) + leur "
+            "historique permits (max 5 par parcelle). Use case killer "
+            "Marchand de Biens : pattern d'activite local autour d'un "
+            "permis identifie. Permet de detecter zone en mutation "
+            "(plusieurs permis recents sur les parcelles voisines), "
+            "opportunites adjacentes (parcelles voisines sans activite "
+            "recente), densification (parcelles voisines deja baties vs "
+            "libres). Methode : centroide du permit source via "
+            "permits.geom geocode BAN en priorite, sinon ST_Centroid("
+            "cadastre_geom). Recherche PostGIS ST_DWithin sur les 35M "
+            "parcelles France avec pre-filtre commune_code pour exploiter "
+            "l'index. Distance calculee en geography pour metres exacts. "
+            "La parcelle du permit source est exclue des voisins (pas "
+            "d'auto-reference). Plan Pro+ uniquement. Cout quota : 1 + "
+            "nombre de voisins retournes (composite coherent avec /360 et "
+            "/v1/parcelles/{id}). Reponse : permit_commune_code + "
+            "permit_center lat/lng + search_radius_m + neighbors_count + "
+            "neighbors (liste triee par distance croissante). Chaque "
+            "voisin contient : id_parcelle 14 chars + section + numero + "
+            "distance_m precise + contenance_m2 DGFiP + centroid lat/lng "
+            "+ permits_count + permits[] (max 5 items : num_pa + type + "
+            "annee + etat + surface). Use case complet : (1) "
+            "search_permits pour trouver un permis cible, (2) "
+            "get_neighbor_parcels(num_pa=X, radius_m=200) pour scanner le "
+            "voisinage, (3) get_mdb_score sur les num_pa des voisins "
+            "interessants. Erreur 422 si le permit source n'est ni "
+            "geocode ni cadastre_geom (~11% des permits Sitadel)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "num_pa": {
+                    "type": "string",
+                    "description": (
+                        "Identifiant Sitadel du permit source. Format : "
+                        "13 caracteres alphanumeriques (ex "
+                        "'0930662500027' = Seine-Saint-Denis 2025). "
+                        "Recupere via search_permits ou get_permit_details. "
+                        "Le permit doit avoir des coordonnees (lat/lng "
+                        "geocodes BAN OU cadastre_geom) pour calculer le "
+                        "centroide de recherche."
+                    ),
+                },
+                "radius_m": {
+                    "type": "integer",
+                    "minimum": 10,
+                    "maximum": 2000,
+                    "default": 200,
+                    "description": (
+                        "Rayon de recherche en metres autour du centroide "
+                        "du permit source (10-2000 m, default 200 m). "
+                        "Petit rayon 50-100 m = parcelles directement "
+                        "contigues (ilot). Rayon moyen 200-500 m = "
+                        "quartier proche. Grand rayon 1000-2000 m = "
+                        "quartier elargi voire commune entiere si petite."
+                    ),
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 50,
+                    "default": 10,
+                    "description": (
+                        "Nombre max de parcelles voisines retournees "
+                        "(1-50, default 10). Tri par distance croissante. "
+                        "Aller au-dela de 20 voisins est rarement utile : "
+                        "la pertinence MDB decroit avec la distance, et le "
+                        "cout quota augmente lineairement."
+                    ),
+                },
+            },
+            "required": ["num_pa"],
+        },
+    },
+    {
         "name": "bulk_enrich_list",
         "description": (
             "Croisez une liste fournie par l'utilisateur (max 1000 lignes) "
@@ -1032,6 +1157,26 @@ async def get_mdb_score(
     return await _http_get(f"/v1/permits/{num_pa}/score", client=client)
 
 
+async def get_score_explanation(
+    arguments: dict[str, Any],
+    *,
+    client: httpx.AsyncClient | None = None,
+) -> dict[str, Any]:
+    """GET /v1/permits/{num_pa}/score/explain : transparence Score MDB v0.3.
+
+    Retourne les 11 signaux pondérés avec interprétation FR
+    contextualisée + top 3 drivers + top 3 drags + inputs concrets.
+
+    Use case : audit du score "pourquoi ce permis est noté 87 ?",
+    due-diligence transparente. Plan Pro+ uniquement.
+    Coût composite 2 unités quota (calcul + interprétations).
+    """
+    num_pa = _validate_num_pa(arguments.get("num_pa"))
+    return await _http_get(
+        f"/v1/permits/{num_pa}/score/explain", client=client
+    )
+
+
 async def get_plu_zoning(
     arguments: dict[str, Any],
     *,
@@ -1258,6 +1403,33 @@ async def get_permit_full_view(
     return await _http_get(f"/v1/permits/{num_pa}/360", client=client)
 
 
+async def get_neighbor_parcels(
+    arguments: dict[str, Any],
+    *,
+    client: httpx.AsyncClient | None = None,
+) -> dict[str, Any]:
+    """GET /v1/permits/{num_pa}/parcelles-voisines : parcelles
+    cadastrales voisines + historique permits (Prio 8 sprint 11).
+
+    Use case killer Marchand de Biens : pattern d'activite local autour
+    d'un permis identifie. Plan Pro+ uniquement. Cout composite 1 +
+    nombre de voisins retournes.
+    """
+    num_pa = _validate_num_pa(arguments.get("num_pa"))
+    params: dict[str, Any] = {}
+    radius_m = arguments.get("radius_m")
+    if isinstance(radius_m, int) and 10 <= radius_m <= 2000:
+        params["radius_m"] = radius_m
+    limit = arguments.get("limit")
+    if isinstance(limit, int) and 1 <= limit <= 50:
+        params["limit"] = limit
+    return await _http_get(
+        f"/v1/permits/{num_pa}/parcelles-voisines",
+        params=params,
+        client=client,
+    )
+
+
 # ----------------------------------------------------------------------------
 # Dispatch
 # ----------------------------------------------------------------------------
@@ -1268,6 +1440,7 @@ TOOL_HANDLERS = {
     "get_permit_details": get_permit_details,
     "find_dvf_neighbors": find_dvf_neighbors,
     "get_mdb_score": get_mdb_score,
+    "get_score_explanation": get_score_explanation,
     "get_plu_zoning": get_plu_zoning,
     "get_risks": get_risks,
     "get_parcelle_geometry": get_parcelle_geometry,
@@ -1275,6 +1448,7 @@ TOOL_HANDLERS = {
     "get_parcelle_by_id": get_parcelle_by_id,
     "search_permits_in_polygon": search_permits_in_polygon,
     "get_commune_density_stats": get_commune_density_stats,
+    "get_neighbor_parcels": get_neighbor_parcels,
     "fuzzy_search_addresses": fuzzy_search_addresses,
     "bulk_enrich_list": bulk_enrich_list,
     "get_permit_full_view": get_permit_full_view,
