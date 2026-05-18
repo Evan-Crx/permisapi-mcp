@@ -4,7 +4,7 @@ Cette couche est testable sans avoir le `mcp` package installé : on
 mock juste httpx ou on utilise MockTransport. Le server.py construit
 les Tool MCP à partir d'ici.
 
-16 tools exposés :
+18 tools exposés :
   1. search_permits         : GET /v1/permits avec filtres (Free)
   2. get_permit_details     : GET /v1/permits/{num_pa} (Free)
   3. find_dvf_neighbors     : GET /v1/permits/{num_pa}/dvf (Pro, 12 ans)
@@ -21,6 +21,8 @@ les Tool MCP à partir d'ici.
   14. bulk_enrich_list       : POST /v1/permits/bulk-enrich (Business, croise liste client)
   15. fuzzy_search_addresses : GET /v1/search?q=text (Free, pg_trgm fuzzy)
   16. get_permit_full_view  : GET /v1/permits/{num_pa}/360 (Pro, composite 6-en-1)
+  17. get_economics         : GET /v1/permits/{num_pa}/economics (Pro, budget chantier estime sprint 15)
+  18. get_contractors       : GET /v1/permits/{num_pa}/contractors (Pro, entreprises BTP locales SIRENE NAF 41/42/43 sprint 16)
 
 Sécurité : la clé API du user est lue depuis l'env PERMISAPI_KEY au
 démarrage du serveur, jamais transmise via les arguments d'un tool.
@@ -107,7 +109,7 @@ async def _http_get(
     headers = {
         "X-API-Key": _api_key(),
         "Accept": "application/json",
-        "User-Agent": "permisapi-mcp/0.5.6",
+        "User-Agent": "permisapi-mcp/0.5.8",
     }
     own_client = client is None
     c = client or httpx.AsyncClient(timeout=HTTP_TIMEOUT)
@@ -139,7 +141,7 @@ async def _http_post(
         "X-API-Key": _api_key(),
         "Accept": "application/json",
         "Content-Type": "application/json",
-        "User-Agent": "permisapi-mcp/0.5.6",
+        "User-Agent": "permisapi-mcp/0.5.8",
     }
     own_client = client is None
     c = client or httpx.AsyncClient(timeout=HTTP_TIMEOUT)
@@ -349,7 +351,15 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "passées sur des biens proches avec leur prix, date, type "
             "(maison/appartement/dépendance/local commercial), surface, "
             "nombre de pièces et distance en mètres. Filtre côté serveur "
-            "les transactions < 1000 EUR (donations DGFiP). Purpose : "
+            "les transactions < 1000 EUR (donations DGFiP). "
+            "**Nouveau sprint 15** : le payload contient désormais "
+            "`dvf_median_price_per_m2` (médiane brute en EUR/m² calculée "
+            "sur les matches retournés, après filtres) et "
+            "`dvf_median_sample_size` (taille de l'échantillon retenu, "
+            "peut être plus petit que `len(matches)` si certaines ventes "
+            "sont des terrains nus ou ont une surface manquante). Utile "
+            "pour répondre directement à 'quel est le prix au m² dans "
+            "ce quartier ?' sans recalculer côté client. Purpose : "
             "estimer le prix au m² du quartier pour un marchand de biens, "
             "calibrer une offre d'achat, vérifier la cohérence DVF avec un "
             "prix annoncé. Usage guideline : `limit=3` est généralement "
@@ -1075,6 +1085,165 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "required": ["num_pa"],
         },
     },
+    {
+        "name": "get_economics",
+        "description": (
+            "Estimation du budget chantier d'un permis : 'combien va "
+            "coûter ce projet ?' avec fourchette basse / médiane / haute "
+            "(EUR), détail au m², scénario détecté (construction neuve, "
+            "rénovation lourde / légère, démolition, aménagement). "
+            "Behavior : appelle `GET /v1/permits/{num_pa}/economics` qui "
+            "combine 3 sources : "
+            "(1) **surfaces déclarées par le constructeur dans le permit "
+            "Sitadel** (SURF_HAB_CREEE + SURF_LOC_CREEE + transformations) "
+            "avec ratio fallback sur le terrain quand absentes ; "
+            "(2) **barème statique calibré** sur la littérature publique "
+            "Capeb / FFB / Anjou Construction 2024 (cout au m² par type "
+            "de projet, modulé par département : Paris +25%, Côte d'Azur "
+            "+20%, métropoles régionales +5% ; et par taille : micro +20%, "
+            "grands programmes -15%) ; "
+            "(3) **modulateur officiel INSEE ICP-BT** (Indice du Coût de "
+            "Production des Bâtiments, base 2015) qui actualise l'inflation "
+            "réelle des coûts (décembre 2025 = 114.9 = +14.9% depuis 2015). "
+            "Retourne aussi `confidence` 0.0-1.0 (haute si surface "
+            "déclarée + INSEE dispo, basse si fallback terrain), les "
+            "modulateurs appliqués pour transparence (audit-friendly), "
+            "et des notes FR contextualisées. "
+            "Use case typique : un MDB calibre une offre d'achat "
+            "('chantier estimé 500-700k, je rachète le terrain à 400k = "
+            "marge brute X'), une PropTech répond à un appel d'offres, "
+            "une banque audite un dossier ('constructeur déclare 600k, "
+            "notre estimation 750-1M = sous-évaluation à creuser'). "
+            "Coût : 3 unités quota. Plan Pro+ uniquement (Free/Explorer "
+            "reçoivent 402). Depuis sprint 16 jour 1, retourne aussi "
+            "`breakdown_by_lot` (gros oeuvre 38%, plomberie 11%, "
+            "électricité 9%, etc. selon scénario) avec les codes NAF "
+            "SIRENE associés, à passer ensuite en filtre à get_contractors "
+            "pour identifier les entreprises locales qualifiées par lot."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "num_pa": {
+                    "type": "string",
+                    "description": (
+                        "Identifiant Sitadel unique du permis (ex "
+                        "`0930662500027`). 13 caractères alphanumériques."
+                    ),
+                    "minLength": 1,
+                    "maxLength": 50,
+                },
+            },
+            "required": ["num_pa"],
+        },
+    },
+    {
+        "name": "get_contractors",
+        "description": (
+            "Entreprises BTP locales autour d'un permis : 'qui sont les "
+            "électriciens / plombiers / maçons à moins de X km de ce "
+            "chantier ?'. Pont natif avec get_economics : pour chaque lot "
+            "de breakdown_by_lot (gros oeuvre, plomberie, électricité, "
+            "etc.), passer les codes NAF du lot à ce tool pour identifier "
+            "les entreprises locales qualifiées. "
+            "Behavior : appelle `GET /v1/permits/{num_pa}/contractors` qui "
+            "interroge la base SIRENE INSEE filtrée NAF 41/42/43 (BTP) "
+            "ingérée mensuellement, 1 086 952 établissements actifs en "
+            "France dont 830 860 géolocalisés WGS84 (76,4 % couverture). "
+            "Recherche PostGIS `ST_DWithin` sur les coordonnées Lambert93 "
+            "officielles converties WGS84. Tri par distance croissante. "
+            "Pagination via `has_more`. "
+            "Filtres optionnels : "
+            "(1) `naf_codes` CSV (ex `43.21A,43.21B` électricité) "
+            "limité aux 41/42/43 BTP, accepte format compact `4321A` ; "
+            "(2) `radius_m` 500 à 50 000 m (défaut 5 000 m) ; "
+            "(3) `limit` 1-100 (défaut 20) ; "
+            "(4) `effectif_min` borne basse tranche INSEE (défaut 0 = "
+            "toutes tailles) ; "
+            "(5) `include_inactive` boolean (défaut false = uniquement "
+            "actifs administrativement). "
+            "Retourne pour chaque entreprise : siren / siret / raison "
+            "sociale / enseigne / code NAF + libellé / siège oui-non / "
+            "tranche d'effectif (00 à 53 INSEE) + bornes salariés / "
+            "ancienneté en années / adresse complète / commune / "
+            "distance en mètres. "
+            "Use case Marchand de biens / PropTech / Promoteur : 'j'ai "
+            "identifié un permis à Paris, qui sont les électriciens "
+            "NAF 43.21A à moins de 5 km avec au moins 10 salariés ?'. "
+            "Coût : 5 unités quota composite (anti-abus). Plan Pro+ "
+            "uniquement (Free / Explorer reçoivent 402). 422 si permit "
+            "non géolocalisé ou si codes NAF hors scope BTP."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "num_pa": {
+                    "type": "string",
+                    "description": (
+                        "Identifiant Sitadel unique du permis (ex "
+                        "`0930662500027`). 13 caractères alphanumériques."
+                    ),
+                    "minLength": 1,
+                    "maxLength": 50,
+                },
+                "naf_codes": {
+                    "type": "string",
+                    "description": (
+                        "CSV de codes NAF à filtrer (ex `43.21A,43.21B` "
+                        "pour électricité, `43.22A,43.22B` pour plomberie "
+                        "/ chauffage / climatisation, `41.20A` pour "
+                        "construction maisons individuelles). Format "
+                        "canonique SIRENE avec point (`XX.XXL`) ou compact "
+                        "(`XXXXL`). Tous les codes doivent être en 41/42/43 "
+                        "(BTP), sinon 422. Optionnel, défaut tous les "
+                        "codes BTP. Max 50 codes anti-abus."
+                    ),
+                },
+                "radius_m": {
+                    "type": "integer",
+                    "description": (
+                        "Rayon de recherche en mètres autour du centroide "
+                        "du permis. Min 500, max 50 000, défaut 5 000 "
+                        "(5 km). Petit rayon = entreprises directement "
+                        "locales. Grand rayon = bassin d'emploi élargi "
+                        "(utile en zone rurale)."
+                    ),
+                    "minimum": 500,
+                    "maximum": 50000,
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": (
+                        "Nombre max d'entreprises retournées (1-100, "
+                        "défaut 20). Tri par distance croissante (la plus "
+                        "proche d'abord)."
+                    ),
+                    "minimum": 1,
+                    "maximum": 100,
+                },
+                "effectif_min": {
+                    "type": "integer",
+                    "description": (
+                        "Effectif salarié minimum (défaut 0 = toutes "
+                        "tailles, 10 = au moins 10 salariés, etc.). Filtre "
+                        "sur la borne basse de la tranche INSEE. Utile "
+                        "pour qualifier des sous-traitants capables de "
+                        "prendre un gros lot."
+                    ),
+                    "minimum": 0,
+                    "maximum": 10000,
+                },
+                "include_inactive": {
+                    "type": "boolean",
+                    "description": (
+                        "Si true, inclut les établissements SIRENE fermés "
+                        "administrativement (défaut false)."
+                    ),
+                },
+            },
+            "required": ["num_pa"],
+        },
+    },
 ]
 
 
@@ -1430,6 +1599,68 @@ async def get_neighbor_parcels(
     )
 
 
+async def get_economics(
+    arguments: dict[str, Any],
+    *,
+    client: httpx.AsyncClient | None = None,
+) -> dict[str, Any]:
+    """GET /v1/permits/{num_pa}/economics : estimation budget chantier.
+
+    Sprint 15 sprint 15 killer feature MDB / PropTech : combine
+    surfaces Sitadel + bareme Capeb / FFB + modulateur INSEE ICP-BT.
+    Quota composite 3 unites. Plan Pro+ uniquement.
+    """
+    num_pa = _validate_num_pa(arguments.get("num_pa"))
+    return await _http_get(
+        f"/v1/permits/{num_pa}/economics", client=client
+    )
+
+
+async def get_contractors(
+    arguments: dict[str, Any],
+    *,
+    client: httpx.AsyncClient | None = None,
+) -> dict[str, Any]:
+    """GET /v1/permits/{num_pa}/contractors : entreprises BTP locales.
+
+    Sprint 16 jour 3 : interroge la base SIRENE INSEE filtree NAF
+    41/42/43 ingere mensuellement (1.087M etablissements actifs, 76,4%
+    geolocalises Lambert93 -> WGS84). Pont natif avec breakdown_by_lot
+    de get_economics : pour chaque lot, passer les codes NAF a ce tool.
+    Filtres optionnels : naf_codes (CSV BTP), radius_m (500-50000),
+    limit (1-100), effectif_min (0-10000), include_inactive (bool).
+    Quota composite 5 unites. Plan Pro+ uniquement.
+    """
+    num_pa = _validate_num_pa(arguments.get("num_pa"))
+    params: dict[str, Any] = {}
+
+    naf_codes = arguments.get("naf_codes")
+    if isinstance(naf_codes, str) and naf_codes.strip():
+        params["naf_codes"] = naf_codes.strip()
+
+    radius_m = arguments.get("radius_m")
+    if isinstance(radius_m, int) and 500 <= radius_m <= 50000:
+        params["radius_m"] = radius_m
+
+    limit = arguments.get("limit")
+    if isinstance(limit, int) and 1 <= limit <= 100:
+        params["limit"] = limit
+
+    effectif_min = arguments.get("effectif_min")
+    if isinstance(effectif_min, int) and 0 <= effectif_min <= 10000:
+        params["effectif_min"] = effectif_min
+
+    include_inactive = arguments.get("include_inactive")
+    if isinstance(include_inactive, bool) and include_inactive:
+        params["include_inactive"] = "true"
+
+    return await _http_get(
+        f"/v1/permits/{num_pa}/contractors",
+        params=params or None,
+        client=client,
+    )
+
+
 # ----------------------------------------------------------------------------
 # Dispatch
 # ----------------------------------------------------------------------------
@@ -1452,6 +1683,8 @@ TOOL_HANDLERS = {
     "fuzzy_search_addresses": fuzzy_search_addresses,
     "bulk_enrich_list": bulk_enrich_list,
     "get_permit_full_view": get_permit_full_view,
+    "get_economics": get_economics,
+    "get_contractors": get_contractors,
 }
 
 

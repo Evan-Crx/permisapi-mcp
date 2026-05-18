@@ -48,8 +48,8 @@ def _mock_transport(handler):
 # ----------------------------------------------------------------------------
 
 
-def test_sixteen_tools_defined():
-    """v0.5.6 ajoute get_score_explanation (sprint 14 transparence Score MDB)."""
+def test_eighteen_tools_defined():
+    """v0.5.8 ajoute get_contractors (sprint 16 entreprises BTP SIRENE)."""
     names = {t["name"] for t in TOOL_SCHEMAS}
     assert names == {
         "search_permits",
@@ -68,6 +68,8 @@ def test_sixteen_tools_defined():
         "fuzzy_search_addresses",
         "bulk_enrich_list",
         "get_permit_full_view",
+        "get_economics",
+        "get_contractors",
     }
 
 
